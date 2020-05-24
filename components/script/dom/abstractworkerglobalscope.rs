@@ -82,12 +82,14 @@ impl ScriptPort for Receiver<DedicatedWorkerScriptMsg> {
 
 pub trait WorkerEventLoopMethods {
     type WorkerMsg: QueuedTaskConversion + Send;
+    type ControlMsg;
     type Event;
     fn task_queue(&self) -> &TaskQueue<Self::WorkerMsg>;
     fn handle_event(&self, event: Self::Event);
     fn handle_worker_post_event(&self, worker: &TrustedWorkerAddress) -> Option<AutoWorkerReset>;
     fn from_worker_msg(&self, msg: Self::WorkerMsg) -> Self::Event;
     fn from_devtools_msg(&self, msg: DevtoolScriptControlMsg) -> Self::Event;
+    fn control_receiver(&self) -> &Receiver<Self::ControlMsg>;
 }
 
 // https://html.spec.whatwg.org/multipage/#worker-event-loop
@@ -108,6 +110,16 @@ pub fn run_worker_event_loop<T, WorkerMsg, Event>(
     };
     let task_queue = worker_scope.task_queue();
     let event = select! {
+        recv(worker_scope.control_receiver()) -> msg => {
+            // Note: this is currently only used to signal shutdown,
+            // to enable more functionality, add other methods
+            // to translate the msg into an event,
+            // and handle the event.
+
+            // Shutdown.
+            assert!(msg.is_err());
+            return;
+        },
         recv(task_queue.select()) -> msg => {
             task_queue.take_tasks(msg.unwrap());
             worker_scope.from_worker_msg(task_queue.recv().unwrap())

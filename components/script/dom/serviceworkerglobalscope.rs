@@ -165,10 +165,16 @@ pub struct ServiceWorkerGlobalScope {
     swmanager_sender: IpcSender<ServiceWorkerMsg>,
 
     scope_url: ServoUrl,
+
+    /// A receiver of control messages,
+    /// currently only used to signal shutdown.
+    #[ignore_malloc_size_of = "Channels are hard"]
+    control_receiver: Receiver<()>,
 }
 
 impl WorkerEventLoopMethods for ServiceWorkerGlobalScope {
     type WorkerMsg = ServiceWorkerScriptMsg;
+    type ControlMsg = ();
     type Event = MixedMessage;
 
     fn task_queue(&self) -> &TaskQueue<ServiceWorkerScriptMsg> {
@@ -190,6 +196,10 @@ impl WorkerEventLoopMethods for ServiceWorkerGlobalScope {
     fn from_devtools_msg(&self, msg: DevtoolScriptControlMsg) -> MixedMessage {
         MixedMessage::FromDevtools(msg)
     }
+
+    fn control_receiver(&self) -> &Receiver<()> {
+        &self.control_receiver
+    }
 }
 
 impl ServiceWorkerGlobalScope {
@@ -203,6 +213,7 @@ impl ServiceWorkerGlobalScope {
         time_out_port: Receiver<Instant>,
         swmanager_sender: IpcSender<ServiceWorkerMsg>,
         scope_url: ServoUrl,
+        control_receiver: Receiver<()>,
     ) -> ServiceWorkerGlobalScope {
         ServiceWorkerGlobalScope {
             workerglobalscope: WorkerGlobalScope::new_inherited(
@@ -220,6 +231,7 @@ impl ServiceWorkerGlobalScope {
             time_out_port,
             swmanager_sender: swmanager_sender,
             scope_url: scope_url,
+            control_receiver,
         }
     }
 
@@ -234,6 +246,7 @@ impl ServiceWorkerGlobalScope {
         time_out_port: Receiver<Instant>,
         swmanager_sender: IpcSender<ServiceWorkerMsg>,
         scope_url: ServoUrl,
+        control_receiver: Receiver<()>,
     ) -> DomRoot<ServiceWorkerGlobalScope> {
         let cx = runtime.cx();
         let scope = Box::new(ServiceWorkerGlobalScope::new_inherited(
@@ -246,6 +259,7 @@ impl ServiceWorkerGlobalScope {
             time_out_port,
             swmanager_sender,
             scope_url,
+            control_receiver,
         ));
         unsafe { ServiceWorkerGlobalScopeBinding::Wrap(SafeJSContext::from_ptr(cx), scope) }
     }
@@ -259,6 +273,7 @@ impl ServiceWorkerGlobalScope {
         devtools_receiver: IpcReceiver<DevtoolScriptControlMsg>,
         swmanager_sender: IpcSender<ServiceWorkerMsg>,
         scope_url: ServoUrl,
+        control_receiver: Receiver<()>,
     ) -> JoinHandle<()> {
         let ScopeThings {
             script_url,
@@ -315,6 +330,7 @@ impl ServiceWorkerGlobalScope {
                     time_out_port,
                     swmanager_sender,
                     scope_url,
+                    control_receiver,
                 );
 
                 let (_url, source) =

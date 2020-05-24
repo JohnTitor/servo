@@ -183,10 +183,15 @@ pub struct DedicatedWorkerGlobalScope {
     #[ignore_malloc_size_of = "Arc"]
     image_cache: Arc<dyn ImageCache>,
     browsing_context: Option<BrowsingContextId>,
+    /// A receiver of control messages,
+    /// currently only used to signal shutdown.
+    #[ignore_malloc_size_of = "Channels are hard"]
+    control_receiver: Receiver<()>,
 }
 
 impl WorkerEventLoopMethods for DedicatedWorkerGlobalScope {
     type WorkerMsg = DedicatedWorkerScriptMsg;
+    type ControlMsg = ();
     type Event = MixedMessage;
 
     fn task_queue(&self) -> &TaskQueue<DedicatedWorkerScriptMsg> {
@@ -209,6 +214,10 @@ impl WorkerEventLoopMethods for DedicatedWorkerGlobalScope {
     fn from_devtools_msg(&self, msg: DevtoolScriptControlMsg) -> MixedMessage {
         MixedMessage::FromDevtools(msg)
     }
+
+    fn control_receiver(&self) -> &Receiver<()> {
+        &self.control_receiver
+    }
 }
 
 impl DedicatedWorkerGlobalScope {
@@ -226,6 +235,7 @@ impl DedicatedWorkerGlobalScope {
         image_cache: Arc<dyn ImageCache>,
         browsing_context: Option<BrowsingContextId>,
         gpu_id_hub: Arc<Mutex<Identities>>,
+        control_receiver: Receiver<()>,
     ) -> DedicatedWorkerGlobalScope {
         DedicatedWorkerGlobalScope {
             workerglobalscope: WorkerGlobalScope::new_inherited(
@@ -244,6 +254,7 @@ impl DedicatedWorkerGlobalScope {
             worker: DomRefCell::new(None),
             image_cache: image_cache,
             browsing_context,
+            control_receiver,
         }
     }
 
@@ -262,6 +273,7 @@ impl DedicatedWorkerGlobalScope {
         image_cache: Arc<dyn ImageCache>,
         browsing_context: Option<BrowsingContextId>,
         gpu_id_hub: Arc<Mutex<Identities>>,
+        control_receiver: Receiver<()>,
     ) -> DomRoot<DedicatedWorkerGlobalScope> {
         let cx = runtime.cx();
         let scope = Box::new(DedicatedWorkerGlobalScope::new_inherited(
@@ -278,6 +290,7 @@ impl DedicatedWorkerGlobalScope {
             image_cache,
             browsing_context,
             gpu_id_hub,
+            control_receiver,
         ));
         unsafe { DedicatedWorkerGlobalScopeBinding::Wrap(SafeJSContext::from_ptr(cx), scope) }
     }
@@ -299,6 +312,7 @@ impl DedicatedWorkerGlobalScope {
         image_cache: Arc<dyn ImageCache>,
         browsing_context: Option<BrowsingContextId>,
         gpu_id_hub: Arc<Mutex<Identities>>,
+        control_receiver: Receiver<()>,
     ) -> JoinHandle<()> {
         let serialized_worker_url = worker_url.to_string();
         let name = format!("WebWorker for {}", serialized_worker_url);
@@ -370,6 +384,7 @@ impl DedicatedWorkerGlobalScope {
                     image_cache,
                     browsing_context,
                     gpu_id_hub,
+                    control_receiver,
                 );
                 // FIXME(njn): workers currently don't have a unique ID suitable for using in reporter
                 // registration (#6631), so we instead use a random number and cross our fingers.
