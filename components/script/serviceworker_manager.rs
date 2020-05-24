@@ -24,7 +24,7 @@ use servo_config::pref;
 use servo_url::ImmutableOrigin;
 use servo_url::ServoUrl;
 use std::collections::HashMap;
-use std::thread;
+use std::thread::{self, JoinHandle};
 
 enum Message {
     FromResource(CustomResponseMediator),
@@ -77,6 +77,25 @@ enum RegistrationUpdateTarget {
     Active,
 }
 
+impl Drop for ServiceWorkerRegistration {
+    /// <https://html.spec.whatwg.org/multipage/workers.html#terminate-a-worker>
+    fn drop(&mut self) {
+        // Drop the channel to signal shutdown.
+        drop(
+            self.control_sender
+                .take()
+                .expect("No control sender to worker thread."),
+        );
+
+        // TODO: Step 1, 2 and 3.
+        self.join_handle
+            .take()
+            .expect("No handle to join on worker.")
+            .join()
+            .expect("Couldn't join on worker thread.");
+    }
+}
+
 /// https://w3c.github.io/ServiceWorker/#service-worker-registration-concept
 struct ServiceWorkerRegistration {
     /// A unique identifer.
@@ -87,6 +106,11 @@ struct ServiceWorkerRegistration {
     waiting_worker: Option<ServiceWorker>,
     /// https://w3c.github.io/ServiceWorker/#dfn-installing-worker
     installing_worker: Option<ServiceWorker>,
+    /// A channel to send control message to the worker,
+    /// currently only used to signal shutdown.
+    control_sender: Option<Sender<()>>,
+    /// A handle to join on the worker thread.
+    join_handle: Option<JoinHandle<()>>,
 }
 
 impl ServiceWorkerRegistration {
@@ -96,7 +120,17 @@ impl ServiceWorkerRegistration {
             active_worker: None,
             waiting_worker: None,
             installing_worker: None,
+            join_handle: None,
+            control_sender: None,
         }
+    }
+
+    fn note_worker_thread(&mut self, join_handle: JoinHandle<()>, control_sender: Sender<()>) {
+        assert!(self.join_handle.is_none());
+        self.join_handle = Some(join_handle);
+
+        assert!(self.control_sender.is_none());
+        self.control_sender = Some(control_sender);
     }
 
     /// <https://w3c.github.io/ServiceWorker/#get-newest-worker>
@@ -183,6 +217,10 @@ impl ServiceWorkerManager {
                 Message::FromResource(msg) => self.handle_message_from_resource(msg),
             };
             if !should_continue {
+                for registration in self.registrations.drain() {
+                    // Signal shut-down, and join on the thread.
+                    drop(registration);
+                }
                 break;
             }
         }
@@ -326,8 +364,11 @@ impl ServiceWorkerManager {
 
             // Very roughly steps 5 to 18.
             // TODO: implement all steps precisely.
-            let new_worker =
+            let (new_worker, join_handle, control_sender) =
                 update_serviceworker(self.own_sender.clone(), job.scope_url.clone(), scope_things);
+
+            // Since we've just started the worker thread, ensure we can shut it down later.
+            registration.note_worker_thread(join_handle, control_sender);
 
             // Step 19, run Install.
 
@@ -363,21 +404,28 @@ fn update_serviceworker(
     own_sender: IpcSender<ServiceWorkerMsg>,
     scope_url: ServoUrl,
     scope_things: ScopeThings,
-) -> ServiceWorker {
+) -> (ServiceWorker, JoinHandle<()>, Sender<()>) {
     let (sender, receiver) = unbounded();
     let (_devtools_sender, devtools_receiver) = ipc::channel().unwrap();
     let worker_id = ServiceWorkerId::new();
 
-    ServiceWorkerGlobalScope::run_serviceworker_scope(
+    let (control_sender, control_receiver) = unbounded();
+
+    let join_handle = ServiceWorkerGlobalScope::run_serviceworker_scope(
         scope_things.clone(),
         sender.clone(),
         receiver,
         devtools_receiver,
         own_sender,
         scope_url.clone(),
+        control_receiver,
     );
 
-    ServiceWorker::new(scope_things.script_url, sender, worker_id)
+    (
+        ServiceWorker::new(scope_things.script_url, sender, worker_id),
+        join_handle,
+        control_sender,
+    )
 }
 
 impl ServiceWorkerManagerFactory for ServiceWorkerManager {
